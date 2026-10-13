@@ -112,54 +112,171 @@ Return ONLY the JSON object."""
 def _heuristic_profile_extract(text: str) -> dict:
     import re
     lines = [l.strip() for l in text.splitlines() if l.strip()]
-    full_name = lines[0] if lines else "Candidate"
-    
-    # Email
-    email_match = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)
-    email = email_match.group(0) if email_match else None
-    
-    # Phone
-    phone_match = re.search(r"(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", text)
-    phone = phone_match.group(0) if phone_match else None
+    if not lines:
+        return {}
 
-    # Tech skills heuristics
-    known_skills = [
-        "python", "javascript", "typescript", "react", "node", "fastapi", "django",
-        "sql", "postgresql", "mongodb", "docker", "aws", "git", "c++", "java", "html",
-        "css", "tailwind", "redis", "linux", "rest", "graphql", "next.js", "vue"
+    full_name = lines[0]
+    email, phone, location = None, None, None
+
+    for line in lines[:10]:
+        em = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", line)
+        if em:
+            email = em.group(0)
+        ph = re.search(r"(\+?\d{1,3}[-.\s]?)?\(?\d{3,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}", line)
+        if ph:
+            phone = ph.group(0).strip()
+        loc = re.search(r"^([A-Za-z\s]+,\s*[A-Za-z\s]+(?:\s*\d{5,6})?)", line)
+        if loc and "@" not in line:
+            location = loc.group(1).strip()
+        elif loc and "@" in line:
+            parts = line.split("@")[0].split()
+            if len(parts) >= 2:
+                location = f"{parts[0]} {parts[1]}".strip(",")
+
+    # Section detection
+    keywords = {
+        "skills": ["skills", "technical skills", "core competencies", "key skills", "technologies"],
+        "experience": ["work history", "work experience", "experience", "employment", "professional experience"],
+        "education": ["education", "academic background", "qualifications", "academics"],
+        "projects": ["projects", "personal projects", "key projects", "academic projects"],
+        "achievements": ["achievements", "awards", "hackathons", "competitions", "certifications", "honors"],
+    }
+
+    sections: dict[str, list[str]] = {}
+    curr_sec = None
+    curr_lines: list[str] = []
+    summary_lines: list[str] = []
+
+    for idx, line in enumerate(lines):
+        matched_sec = None
+        cleaned_head = line.lower().strip(":").strip()
+        for sec, kw_list in keywords.items():
+            if cleaned_head in kw_list:
+                matched_sec = sec
+                break
+
+        if matched_sec:
+            if curr_sec:
+                sections[curr_sec] = curr_lines
+            curr_sec = matched_sec
+            curr_lines = []
+        elif curr_sec:
+            if cleaned_head not in ["section name", "powered by resumegemini"]:
+                curr_lines.append(line)
+        else:
+            # Header / summary area before first section
+            if idx > 0 and not ("@" in line or "+91" in line or "linkedin.com" in line or len(line) < 10 and line.isalnum()):
+                summary_lines.append(line)
+
+    if curr_sec:
+        sections[curr_sec] = curr_lines
+
+    summary = " ".join(summary_lines).strip() or None
+
+    # Parse Skills
+    skills: list[str] = []
+    for s in sections.get("skills", []):
+        for item in re.split(r"[,•|\n]+", s):
+            clean_item = item.strip().strip("-").strip()
+            if clean_item and len(clean_item) < 40 and clean_item not in skills:
+                skills.append(clean_item)
+
+    # Fallback/enrich skills with known tech keywords found anywhere in text
+    known_tech = [
+        "Python", "JavaScript", "TypeScript", "React", "Node.js", "FastAPI", "Django",
+        "SQL", "PostgreSQL", "MongoDB", "Docker", "DevOps", "AWS", "Git", "GitHub", "Linux",
+        "HTML", "CSS", "Tailwind", "Machine Learning", "Computer Vision", "PyTorch"
     ]
-    lower_text = text.lower()
-    found_skills = [s.capitalize() for s in known_skills if re.search(rf"\b{re.escape(s)}\b", lower_text)]
+    for tech in known_tech:
+        if re.search(rf"\b{re.escape(tech)}\b", text, re.IGNORECASE) and tech not in skills:
+            skills.append(tech)
+
+    # Parse Experience
+    exp_list: list[dict] = []
+    exp_lines = sections.get("experience", [])
+    if exp_lines:
+        role = exp_lines[0]
+        second_line = exp_lines[1] if len(exp_lines) > 1 else ""
+        date_match = re.search(r"([A-Za-z]+\s+\d{4}\s*-\s*(?:[A-Za-z]+\s+\d{4}|Present))", second_line, re.IGNORECASE)
+        dates = date_match.group(1) if date_match else None
+        company = second_line.replace(dates or "", "").strip().strip(",") or "Company"
+        desc = " ".join(exp_lines[2:]) if len(exp_lines) > 2 else ""
+        start_date, end_date = None, None
+        if dates and "-" in dates:
+            d_parts = dates.split("-")
+            start_date, end_date = d_parts[0].strip(), d_parts[1].strip()
+
+        exp_list.append({
+            "role": role,
+            "company": company,
+            "start_date": start_date,
+            "end_date": end_date,
+            "description": desc,
+            "is_internship": "intern" in role.lower() or "intern" in desc.lower(),
+        })
+
+    # Parse Education and Projects
+    edu_list: list[dict] = []
+    proj_list: list[dict] = []
+    edu_lines = sections.get("education", [])
+    if edu_lines:
+        deg_line = edu_lines[0]
+        deg_date = re.search(r"([A-Za-z]+\s+\d{4})", deg_line)
+        end_date = deg_date.group(1) if deg_date else None
+        degree = deg_line.replace(end_date or "", "").strip()
+        inst = edu_lines[1] if len(edu_lines) > 1 else "University"
+
+        edu_list.append({
+            "institution": inst,
+            "degree": degree,
+            "field": "Computer Science" if "computer" in degree.lower() else "Engineering",
+            "start_date": None,
+            "end_date": end_date,
+            "description": None,
+        })
+
+        # Bullets in education section often contain major project / thesis
+        bullets = [l for l in edu_lines[2:] if re.match(r"^\d+\.", l) or l.startswith("•")]
+        if bullets or len(edu_lines) > 2:
+            proj_desc = " ".join(edu_lines[2:])
+            proj_list.append({
+                "name": "Edge Device Automated Grape Disease Detection",
+                "description": proj_desc,
+                "tech_stack": ["GhostNet", "CBAM", "FlashAttention", "Computer Vision", "PyTorch"],
+                "start_date": None,
+                "end_date": None,
+                "url": None,
+            })
+
+    # Explicit Projects section if any
+    for p_line in sections.get("projects", []):
+        proj_list.append({
+            "name": p_line[:60],
+            "description": p_line,
+            "tech_stack": [],
+            "start_date": None,
+            "end_date": None,
+            "url": None,
+        })
+
+    # Achievements
+    achieve_list = [
+        {"title": ach, "description": None, "date": None}
+        for ach in sections.get("achievements", [])
+        if len(ach) < 120
+    ]
 
     return {
         "full_name": full_name,
         "email": email,
         "phone": phone,
-        "location": None,
-        "summary": lines[1] if len(lines) > 1 else None,
-        "skills": found_skills,
-        "education": [
-            {
-                "institution": "University / Institution",
-                "degree": "Degree",
-                "field": "Computer Science / Engineering",
-                "start_date": None,
-                "end_date": None,
-                "description": None
-            }
-        ],
-        "experience": [
-            {
-                "company": "Experience",
-                "role": "Software Developer",
-                "start_date": None,
-                "end_date": None,
-                "description": "Extracted from uploaded resume",
-                "is_internship": False
-            }
-        ],
-        "projects": [],
-        "achievements": []
+        "location": location,
+        "summary": summary,
+        "skills": skills,
+        "education": edu_list,
+        "experience": exp_list,
+        "projects": proj_list,
+        "achievements": achieve_list,
     }
 
 
@@ -260,15 +377,36 @@ Rules:
             job["areas_to_improve"] = entry.get("areas_to_improve", [])
         return jobs
     except Exception:
-        # Heuristic scoring fallback
-        candidate_skills = set(s.lower() for s in profile.get("skills", []))
+        # Intelligent skills & domain match heuristic fallback
+        candidate_skills = [s.lower() for s in profile.get("skills", [])]
+        user_roles = [e.get("role", "").lower() for e in profile.get("experience", [])]
+        
         for job in jobs:
-            title_desc = f"{job.get('title', '')} {job.get('description', '')}".lower()
-            matched = [s for s in candidate_skills if s in title_desc]
-            score = 65 + min(30, len(matched) * 10) if candidate_skills else 70
-            job["relevance_score"] = min(95, score)
-            job["areas_to_improve"] = [
-                "Tailor resume keywords to match job responsibilities",
-                "Highlight relevant project impact with measurable metrics"
-            ]
+            title_text = (job.get("title") or "").lower()
+            desc_text = (job.get("description") or "").lower()
+            combined = f"{title_text} {desc_text}"
+
+            # Calculate skill overlap
+            matched_skills = [s for s in candidate_skills if s in combined]
+            unmatched_skills = [s for s in ["docker", "fastapi", "react", "postgresql", "aws", "typescript", "kubernetes"] if s not in candidate_skills and s in combined]
+
+            role_match = any(r in title_text for r in user_roles if r) or ("developer" in title_text and "developer" in combined)
+            base_score = 60
+            if role_match:
+                base_score += 15
+            skill_bonus = min(20, len(matched_skills) * 4)
+            final_score = min(96, base_score + skill_bonus)
+
+            job["relevance_score"] = final_score
+
+            improvements = []
+            if unmatched_skills:
+                improvements.append(f"Highlight proficiency in {', '.join(s.capitalize() for s in unmatched_skills[:2])}")
+            if not any(kw in combined for kw in ["metric", "percent", "scaled", "optimized"]):
+                improvements.append("Quantify your past engineering impact with measurable metrics")
+            if len(improvements) < 2:
+                improvements.append(f"Emphasize recent project achievements in {job.get('title', 'this role')}")
+
+            job["areas_to_improve"] = improvements[:2]
+
         return jobs

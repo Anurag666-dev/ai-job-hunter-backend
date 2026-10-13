@@ -131,10 +131,23 @@ async def search_jobs(
     cache_key = f"jobs:{hashlib.md5(brave_query.encode()).hexdigest()}"
     redis = await get_redis()
     cached = await redis.get(cache_key)
+    user_id = int(current_user["id"])
+
     if cached:
         jobs = json.loads(cached)
+        profile_result = await db.execute(select(Profile).where(Profile.user_id == user_id))
+        profile = profile_result.scalar_one_or_none()
+        if profile:
+            profile_dict = {
+                "skills": profile.skills or [],
+                "experience": profile.experience or [],
+                "projects": profile.projects or [],
+                "education": profile.education or [],
+                "achievements": profile.achievements or [],
+            }
+            jobs = await score_jobs_against_profile(jobs, profile_dict)
         # Re-attach visited/saved status from persistent DB
-        jobs = await _attach_user_status(jobs, int(current_user["id"]), db)
+        jobs = await _attach_user_status(jobs, user_id, db)
         return {"jobs": jobs, "cached": True}
 
     # ── 4. Brave API call ─────────────────────────────────────────────────────
@@ -315,6 +328,7 @@ def _saved_to_dict(j: SavedJob) -> dict:
         "posted_date": j.posted_date, "url": j.url, "source": j.source,
         "saved_at": j.saved_at.isoformat() if j.saved_at else None,
         "is_saved": True, "is_visited": False,
+        "relevance_score": None, "areas_to_improve": [],
     }
 
 
@@ -325,4 +339,5 @@ def _visited_to_dict(j: VisitedJob) -> dict:
         "posted_date": j.posted_date, "url": j.url, "source": j.source,
         "visited_at": j.visited_at.isoformat() if j.visited_at else None,
         "is_saved": False, "is_visited": True,
+        "relevance_score": None, "areas_to_improve": [],
     }
