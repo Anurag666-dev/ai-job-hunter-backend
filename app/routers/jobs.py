@@ -114,6 +114,16 @@ async def search_jobs(
             detail="INVALID_JOB_QUERY"   # Frontend maps this to the popup
         )
 
+    user_id = int(current_user["id"])
+
+    # Fallback to user profile location if location not specified in search query
+    search_loc = location.strip()
+    if not search_loc:
+        prof_res = await db.execute(select(Profile.location).where(Profile.user_id == user_id))
+        user_loc = prof_res.scalar_one_or_none()
+        if user_loc:
+            search_loc = user_loc.strip()
+
     # ── 2. Build Brave query ──────────────────────────────────────────────────
     selected_sources = [s.strip().lower() for s in sources.split(",") if s.strip()]
     site_filters = " OR ".join(
@@ -124,8 +134,8 @@ async def search_jobs(
         site_filters = " OR ".join(SOURCE_SITE_MAP.values())
 
     brave_query = f"{query} {site_filters}"
-    if location:
-        brave_query += f" {location}"
+    if search_loc:
+        brave_query += f" {search_loc}"
 
     # ── 3. Cache check ────────────────────────────────────────────────────────
     cache_key = f"jobs:{hashlib.md5(brave_query.encode()).hexdigest()}"

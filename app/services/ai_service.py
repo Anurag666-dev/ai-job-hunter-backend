@@ -118,20 +118,24 @@ def _heuristic_profile_extract(text: str) -> dict:
     full_name = lines[0]
     email, phone, location = None, None, None
 
-    for line in lines[:10]:
+    # Location pattern: e.g. "Sangli, India 416312", "Pune, Maharashtra", "New York, NY"
+    for line in lines[:8]:
         em = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", line)
         if em:
             email = em.group(0)
         ph = re.search(r"(\+?\d{1,3}[-.\s]?)?\(?\d{3,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}", line)
         if ph:
             phone = ph.group(0).strip()
-        loc = re.search(r"^([A-Za-z\s]+,\s*[A-Za-z\s]+(?:\s*\d{5,6})?)", line)
-        if loc and "@" not in line:
-            location = loc.group(1).strip()
-        elif loc and "@" in line:
-            parts = line.split("@")[0].split()
-            if len(parts) >= 2:
-                location = f"{parts[0]} {parts[1]}".strip(",")
+
+        # Check candidate location in line
+        if not location:
+            loc_match = re.search(r"([A-Za-z\s]+,\s*[A-Za-z\s]+(?:\s*\d{5,6})?)", line)
+            if loc_match:
+                cand = loc_match.group(1).strip()
+                words = cand.split()
+                # Ensure it's a realistic location string (<= 4 words, no job buzzwords)
+                if len(words) <= 4 and not any(w in cand.lower() for w in ["developer", "engineer", "software", "experienced", "summary", "skills", "history"]):
+                    location = cand
 
     # Section detection
     keywords = {
@@ -380,32 +384,85 @@ Rules:
         # Intelligent skills & domain match heuristic fallback
         candidate_skills = [s.lower() for s in profile.get("skills", [])]
         user_roles = [e.get("role", "").lower() for e in profile.get("experience", [])]
+        user_projects = profile.get("projects", [])
+        user_exps = profile.get("experience", [])
+
+        tech_catalog = {
+            "FastAPI": ["fastapi"],
+            "Django / DRF": ["django", "django rest framework", "drf"],
+            "Flask": ["flask"],
+            "Pytest & Unit Testing": ["pytest", "unit testing", "test-driven", "tdd"],
+            "PostgreSQL": ["postgres", "postgresql"],
+            "Redis & Caching": ["redis", "caching", "memcached"],
+            "AWS Services (S3, EC2)": ["aws", "amazon web services"],
+            "CI/CD (GitHub Actions)": ["ci/cd", "github actions", "argocd", "jenkins"],
+            "TypeScript": ["typescript", "ts"],
+            "Next.js": ["next.js", "nextjs"],
+            "GraphQL": ["graphql"],
+            "Docker Containers": ["docker", "container"],
+            "Kubernetes": ["kubernetes", "k8s"],
+            "Kafka / Message Queues": ["kafka", "rabbitmq", "celery", "message queue"],
+            "Microservices Architecture": ["microservices", "clean architecture", "system design"],
+            "AI / LLM Integration": ["ai agent", "llm", "langchain", "openai", "agentic", "rag"],
+            "REST API Engineering": ["rest api", "restful", "api development"],
+        }
         
         for job in jobs:
-            title_text = (job.get("title") or "").lower()
+            title_text = (job.get("title") or "").strip()
             desc_text = (job.get("description") or "").lower()
-            combined = f"{title_text} {desc_text}"
+            combined = f"{title_text.lower()} {desc_text}"
 
-            # Calculate skill overlap
-            matched_skills = [s for s in candidate_skills if s in combined]
-            unmatched_skills = [s for s in ["docker", "fastapi", "react", "postgresql", "aws", "typescript", "kubernetes"] if s not in candidate_skills and s in combined]
+            # 1. Tech stack gap analysis
+            missing_tech: list[str] = []
+            matched_tech: list[str] = []
 
-            role_match = any(r in title_text for r in user_roles if r) or ("developer" in title_text and "developer" in combined)
-            base_score = 60
+            for tech_name, patterns in tech_catalog.items():
+                if any(p in combined for p in patterns):
+                    if any(any(p in cs for p in patterns) for cs in candidate_skills):
+                        matched_tech.append(tech_name)
+                    else:
+                        missing_tech.append(tech_name)
+
+            role_match = any(r in title_text.lower() for r in user_roles if r) or ("developer" in title_text.lower() and "developer" in combined)
+            base_score = 62
             if role_match:
-                base_score += 15
-            skill_bonus = min(20, len(matched_skills) * 4)
+                base_score += 14
+            skill_bonus = min(20, len(matched_tech) * 5)
             final_score = min(96, base_score + skill_bonus)
 
             job["relevance_score"] = final_score
 
-            improvements = []
-            if unmatched_skills:
-                improvements.append(f"Highlight proficiency in {', '.join(s.capitalize() for s in unmatched_skills[:2])}")
-            if not any(kw in combined for kw in ["metric", "percent", "scaled", "optimized"]):
-                improvements.append("Quantify your past engineering impact with measurable metrics")
+            # 2. Generate precise, tailored improvements
+            improvements: list[str] = []
+            is_senior = any(w in title_text.lower() for w in ["senior", "sr", "lead", "architect", "staff", "principal"])
+            is_junior = any(w in title_text.lower() for w in ["junior", "jr", "entry", "associate", "intern", "trainee"])
+
+            if missing_tech:
+                top_missing = missing_tech[:2]
+                if len(top_missing) == 1:
+                    improvements.append(f"Demonstrate hands-on proficiency in {top_missing[0]} through repository links or project bullets.")
+                else:
+                    improvements.append(f"Add projects or certifications demonstrating {top_missing[0]} and {top_missing[1]}.")
+
+            if is_senior:
+                improvements.append("Highlight scalable architecture decisions, code review mentorship, and production observability.")
+            elif is_junior:
+                if user_projects:
+                    proj_name = user_projects[0].get("name", "capstone")
+                    improvements.append(f"Emphasize technical challenges solved in your '{proj_name}' project with measurable outcomes.")
+                else:
+                    improvements.append(f"Attach a public GitHub repository showcasing clean, tested code tailored for {title_text}.")
+            else:
+                if matched_tech:
+                    improvements.append(f"Highlight your practical production experience with {matched_tech[0]} in your bullet points.")
+                elif user_exps:
+                    exp_company = user_exps[0].get("company", "")
+                    improvements.append(f"Detail specific backend performance metrics or API milestones achieved at {exp_company}.")
+                else:
+                    improvements.append(f"Align resume terminology directly with {title_text} core deliverables.")
+
             if len(improvements) < 2:
-                improvements.append(f"Emphasize recent project achievements in {job.get('title', 'this role')}")
+                improvements.append(f"Tailor the resume summary specifically for {title_text} competencies.")
 
             job["areas_to_improve"] = improvements[:2]
 
