@@ -32,19 +32,47 @@ async def create_tables():
         await conn.run_sync(Base.metadata.create_all)
 
 
-# ── Redis ──────────────────────────────────────────────────────────────────────
-_redis_client: aioredis.Redis | None = None
+# ── Redis (with in-memory fallback) ───────────────────────────────────────────
+import time
 
+class SimpleMemoryCache:
+    def __init__(self):
+        self._store: dict[str, tuple[str, float]] = {}
 
-async def get_redis() -> aioredis.Redis:
+    async def get(self, key: str):
+        if key in self._store:
+            val, exp = self._store[key]
+            if time.time() < exp:
+                return val
+            del self._store[key]
+        return None
+
+    async def setex(self, key: str, seconds: int, value: str):
+        self._store[key] = (value, time.time() + seconds)
+
+    async def aclose(self):
+        self._store.clear()
+
+_redis_client = None
+_memory_cache = SimpleMemoryCache()
+
+async def get_redis():
     global _redis_client
-    if _redis_client is None:
-        _redis_client = await aioredis.from_url(REDIS_URL, decode_responses=True)
-    return _redis_client
-
+    if _redis_client is not None:
+        return _redis_client
+    try:
+        client = await aioredis.from_url(REDIS_URL, decode_responses=True)
+        await client.ping()
+        _redis_client = client
+        return _redis_client
+    except Exception:
+        return _memory_cache
 
 async def close_connections():
     global _redis_client
     await engine.dispose()
     if _redis_client:
-        await _redis_client.aclose()
+        try:
+            await _redis_client.aclose()
+        except Exception:
+            pass
