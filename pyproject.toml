@@ -1,7 +1,7 @@
 [project]
 name = "backend"
 version = "0.1.0"
-description = "AI Job Hunter Backend"
+description = "Tech Job Hunters Backend — High-performance Job Discovery & Skill Analytics API"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

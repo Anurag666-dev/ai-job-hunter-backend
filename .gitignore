@@ -1,3 +1,13 @@
+# Environment and credentials
+.env
+.env.*
+!.env.example
+*.backup
+
+# Docker
+docker-compose.yml
+docker-compose.yaml
+
 # Python-generated files
 __pycache__/
 *.py[oc]
@@ -7,4 +17,11 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+.venv/
+env/
+venv/
+
+# Logs and SQLite
+*.log
+*.sqlite
+*.db

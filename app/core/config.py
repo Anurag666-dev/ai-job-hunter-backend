@@ -4,19 +4,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── App ──────────────────────────────────────────────────────────────────────
-APP_TITLE = "AI Job Hunter API"
+APP_TITLE = "Tech Job Hunters API"
 APP_VERSION = "1.0.0"
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", 1776))
 
 # ── Security ─────────────────────────────────────────────────────────────────
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production-please")
+SECRET_KEY = os.getenv("SECRET_KEY", "tech-job-hunters-production-secure-key-32-bytes")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = int(os.getenv("ACCESS_TOKEN_EXPIRE_HOURS", 24))
 
 # ── PostgreSQL ────────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+asyncpg://jobhunter:jobhunter_pass@localhost:5432/ai_job_hunter",
+    "postgresql+asyncpg://postgres:postgres@localhost:5432/tech_job_hunters",
 )
 
 # ── Redis ─────────────────────────────────────────────────────────────────────

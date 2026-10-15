@@ -3,6 +3,7 @@ OpenRouter AI service helper — text-only (PDF text pre-extracted by pdfplumber
 """
 import httpx
 import json
+import re
 from app.core.config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_TEXT_MODEL
 
 
@@ -11,7 +12,7 @@ async def _call_openrouter(messages: list[dict], max_tokens: int = 2000) -> str:
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://ai-job-hunter.local",
-        "X-Title": "AI Job Hunter",
+        "X-Title": "Tech Job Hunters",
     }
     payload = {
         "model": OPENROUTER_TEXT_MODEL,
@@ -315,154 +316,205 @@ Query: "{query}" """
 
 async def score_jobs_against_profile(jobs: list[dict], profile: dict) -> list[dict]:
     """
-    For each job, adds relevance_score (0-100) and areas_to_improve list.
-    Processes in a single API call to avoid rate limits.
+    Scores jobs against the candidate's profile based on keyword match percentage.
+    If the job does not have a visible description, bypasses scoring and marks it clearly.
     """
     if not profile or not jobs:
         return jobs
 
-    profile_summary = json.dumps({
-        "skills": profile.get("skills", []),
-        "experience": [
-            {"role": e.get("role", ""), "company": e.get("company", ""), "description": e.get("description", "")}
-            for e in profile.get("experience", [])[:5]
-        ],
-        "projects": [
-            {"name": p.get("name", ""), "tech_stack": p.get("tech_stack", []), "description": p.get("description", "")}
-            for p in profile.get("projects", [])[:5]
-        ],
-        "education": [
-            {"degree": e.get("degree", ""), "field": e.get("field", "")}
-            for e in profile.get("education", [])[:3]
-        ],
-        "achievements": [a.get("title", "") for a in profile.get("achievements", [])[:5]],
-    }, ensure_ascii=False)
+    # ── 1. Separate scorable jobs from unscorable jobs ─────────────────────────
+    scorable_jobs = []
+    for j in jobs:
+        desc = (j.get("description") or "").strip()
+        # Check if description is missing, too brief, or an anti-scraping placeholder
+        if not desc or len(desc) < 30 or "cannot provide a description" in desc.lower() or "site won't allow us" in desc.lower():
+            j["relevance_score"] = None
+            j["score_note"] = "Cannot score: description not visible"
+            j["matched_keywords"] = []
+            j["missing_keywords"] = []
+            j["areas_to_improve"] = []
+        else:
+            j["score_note"] = None
+            scorable_jobs.append(j)
 
+    if not scorable_jobs:
+        return jobs
+
+    candidate_skills = profile.get("skills", [])
+    candidate_summary = profile.get("summary", "")
+    candidate_projects = [
+        f"{p.get('name', '')} ({', '.join(p.get('tech_stack', []))}): {p.get('description', '')}"
+        for p in profile.get("projects", [])[:5]
+    ]
+    candidate_experience = [
+        f"{e.get('role', '')} at {e.get('company', '')}: {e.get('description', '')}"
+        for e in profile.get("experience", [])[:5]
+    ]
+
+    candidate_full_profile = {
+        "verified_skills": candidate_skills,
+        "summary": candidate_summary,
+        "projects": candidate_projects,
+        "experience": candidate_experience,
+        "education": [f"{e.get('degree', '')} in {e.get('field', '')}" for e in profile.get("education", [])[:3]],
+    }
+
+    # Prepare scorable job listings for AI extraction
     jobs_summary = json.dumps([
-        {"index": i, "title": j.get("title", ""), "company": j.get("company", ""), "description": (j.get("description") or "")[:300]}
-        for i, j in enumerate(jobs[:15])
+        {
+            "index": i,
+            "title": j.get("title", ""),
+            "company": j.get("company", ""),
+            "description": (j.get("description") or "")[:500]
+        }
+        for i, j in enumerate(scorable_jobs[:20])
     ], ensure_ascii=False)
 
-    prompt = f"""You are a career coach AI. Score how well a candidate's profile matches each job listing.
+    prompt = f"""You are an expert technical recruiter and resume analyzer.
+Analyze the candidate's complete profile information against each job listing's title and description.
 
 CANDIDATE PROFILE:
-{profile_summary}
+{json.dumps(candidate_full_profile, ensure_ascii=False)}
 
-JOB LISTINGS (array of objects with index):
+JOB LISTINGS:
 {jobs_summary}
 
-For each job, return a JSON array (NO markdown, NO explanation) like this:
+Instructions for each job listing:
+1. Dynamically identify and extract all core technical, domain, and tool keywords/skills required by the job (job_keywords). Do not extract stop words, verbs, locations, or company names; only extract real technical skills (e.g. programming languages, frameworks, cloud platforms, databases, tools, methodologies).
+2. Compare those against the candidate's profile:
+   - matched_keywords: technical skills demanded by the job that the candidate possesses.
+   - missing_keywords: technical skills demanded by the job that are MISSING from the candidate's profile.
+3. Calculate the mathematical percentage match using this exact formula:
+   relevance_score = round(100 * (len(matched_keywords) / max(len(job_keywords), 1)))
+   (Ensure relevance_score is an integer between 0 and 100).
+4. Provide 1-2 concise, actionable suggestions for areas_to_improve.
+
+Return ONLY a valid JSON array of objects (no markdown, no other text):
 [
   {{
     "index": 0,
-    "relevance_score": 72,
-    "areas_to_improve": ["Add TypeScript to skills", "Mention team leadership experience"]
-  }},
-  ...
-]
-
-Rules:
-- relevance_score: integer 0-100
-- areas_to_improve: 2-3 short, specific, actionable suggestions
-- Return array with same count as input jobs
-- Return ONLY the JSON array"""
+    "job_keywords": ["SkillA", "SkillB", "SkillC"],
+    "matched_keywords": ["SkillA", "SkillB"],
+    "missing_keywords": ["SkillC"],
+    "relevance_score": 67,
+    "areas_to_improve": ["Actionable tip 1", "Actionable tip 2"]
+  }}
+]"""
 
     try:
-        content = await _call_openrouter([{"role": "user", "content": prompt}], max_tokens=2000)
+        content = await _call_openrouter([{"role": "user", "content": prompt}], max_tokens=2500)
         if "```" in content:
             lines = content.split("\n")
             json_lines = [l for l in lines if not l.strip().startswith("```")]
             content = "\n".join(json_lines).strip()
         scores = json.loads(content)
         score_map = {item["index"]: item for item in scores}
-        for i, job in enumerate(jobs):
+        for i, job in enumerate(scorable_jobs):
             entry = score_map.get(i, {})
-            job["relevance_score"] = entry.get("relevance_score", None)
+            matched = entry.get("matched_keywords", [])
+            missing = entry.get("missing_keywords", [])
+            job_kws = entry.get("job_keywords", [])
+            total_req = len(job_kws) if job_kws else (len(matched) + len(missing))
+
+            calc_score = round((len(matched) / total_req) * 100) if total_req > 0 else 0
+            job["relevance_score"] = min(100, max(0, calc_score))
+            job["matched_keywords"] = matched
+            job["missing_keywords"] = missing
             job["areas_to_improve"] = entry.get("areas_to_improve", [])
         return jobs
     except Exception:
-        # Intelligent skills & domain match heuristic fallback
-        candidate_skills = [s.lower() for s in profile.get("skills", [])]
-        user_roles = [e.get("role", "").lower() for e in profile.get("experience", [])]
-        user_projects = profile.get("projects", [])
-        user_exps = profile.get("experience", [])
-
-        tech_catalog = {
-            "FastAPI": ["fastapi"],
-            "Django / DRF": ["django", "django rest framework", "drf"],
-            "Flask": ["flask"],
-            "Pytest & Unit Testing": ["pytest", "unit testing", "test-driven", "tdd"],
-            "PostgreSQL": ["postgres", "postgresql"],
-            "Redis & Caching": ["redis", "caching", "memcached"],
-            "AWS Services (S3, EC2)": ["aws", "amazon web services"],
-            "CI/CD (GitHub Actions)": ["ci/cd", "github actions", "argocd", "jenkins"],
-            "TypeScript": ["typescript", "ts"],
-            "Next.js": ["next.js", "nextjs"],
-            "GraphQL": ["graphql"],
-            "Docker Containers": ["docker", "container"],
-            "Kubernetes": ["kubernetes", "k8s"],
-            "Kafka / Message Queues": ["kafka", "rabbitmq", "celery", "message queue"],
-            "Microservices Architecture": ["microservices", "clean architecture", "system design"],
-            "AI / LLM Integration": ["ai agent", "llm", "langchain", "openai", "agentic", "rag"],
-            "REST API Engineering": ["rest api", "restful", "api development"],
+        # Fallback technical skill recognition: strictly match engineering & candidate domain skills
+        TECH_CATALOG = {
+            # Languages
+            "python": "Python", "java": "Java", "javascript": "JavaScript", "typescript": "TypeScript",
+            "c++": "C++", "c#": "C#", ".net": ".NET", "golang": "Go", "go": "Go", "rust": "Rust",
+            "ruby": "Ruby", "php": "PHP", "swift": "Swift", "kotlin": "Kotlin", "scala": "Scala",
+            "sql": "SQL", "bash": "Bash", "shell": "Shell", "r": "R", "dart": "Dart", "solidity": "Solidity",
+            # Web & Frameworks
+            "fastapi": "FastAPI", "django": "Django", "flask": "Flask", "react": "React", "react.js": "React",
+            "next.js": "Next.js", "nextjs": "Next.js", "vue": "Vue.js", "vue.js": "Vue.js", "angular": "Angular",
+            "spring boot": "Spring Boot", "spring": "Spring", "express": "Express.js", "express.js": "Express.js",
+            "node.js": "Node.js", "nodejs": "Node.js", "node": "Node.js", "nestjs": "NestJS", "rails": "Rails",
+            "asp.net": "ASP.NET", "laravel": "Laravel", "tailwind": "Tailwind CSS", "bootstrap": "Bootstrap",
+            "redux": "Redux", "graphql": "GraphQL", "rest api": "REST APIs", "rest apis": "REST APIs", "rest": "REST APIs",
+            # Data & AI / ML
+            "pytorch": "PyTorch", "tensorflow": "TensorFlow", "keras": "Keras", "pandas": "Pandas",
+            "numpy": "NumPy", "scikit-learn": "Scikit-Learn", "scipy": "SciPy", "opencv": "OpenCV",
+            "nlp": "NLP", "llm": "LLMs", "llms": "LLMs", "genai": "Generative AI", "langchain": "LangChain",
+            "machine learning": "Machine Learning", "deep learning": "Deep Learning", "data science": "Data Science",
+            "data engineering": "Data Engineering", "spark": "Apache Spark", "hadoop": "Hadoop", "airflow": "Airflow",
+            # Cloud & DevOps
+            "aws": "AWS", "azure": "Azure", "gcp": "GCP", "docker": "Docker", "kubernetes": "Kubernetes",
+            "k8s": "Kubernetes", "terraform": "Terraform", "ansible": "Ansible", "jenkins": "Jenkins",
+            "ci/cd": "CI/CD", "github actions": "GitHub Actions", "gitlab ci": "GitLab CI", "linux": "Linux",
+            "nginx": "Nginx", "prometheus": "Prometheus", "grafana": "Grafana", "serverless": "Serverless",
+            "microservices": "Microservices",
+            # Databases & Storage
+            "postgresql": "PostgreSQL", "postgres": "PostgreSQL", "mysql": "MySQL", "mongodb": "MongoDB",
+            "redis": "Redis", "elasticsearch": "Elasticsearch", "cassandra": "Cassandra", "sqlite": "SQLite",
+            "dynamodb": "DynamoDB", "oracle": "Oracle", "firebase": "Firebase", "snowflake": "Snowflake",
+            "bigquery": "BigQuery", "kafka": "Kafka", "rabbitmq": "RabbitMQ",
+            # Practices & Tools
+            "git": "Git", "github": "GitHub", "unit testing": "Unit Testing", "pytest": "Pytest",
+            "jest": "Jest", "junit": "JUnit", "tdd": "TDD", "agile": "Agile", "scrum": "Scrum",
+            "system design": "System Design", "oop": "OOP", "websockets": "WebSockets", "grpc": "gRPC"
         }
-        
-        for job in jobs:
-            title_text = (job.get("title") or "").strip()
-            desc_text = (job.get("description") or "").lower()
-            combined = f"{title_text.lower()} {desc_text}"
 
-            # 1. Tech stack gap analysis
-            missing_tech: list[str] = []
-            matched_tech: list[str] = []
+        # Candidate skills normalized
+        user_skills_clean = {s.strip().lower(): s.strip() for s in candidate_skills if s.strip()}
+        user_corpus = f"{' '.join(candidate_skills)} {candidate_summary} {' '.join(candidate_projects)} {' '.join(candidate_experience)}".lower()
 
-            for tech_name, patterns in tech_catalog.items():
-                if any(p in combined for p in patterns):
-                    if any(any(p in cs for p in patterns) for cs in candidate_skills):
-                        matched_tech.append(tech_name)
-                    else:
-                        missing_tech.append(tech_name)
+        # Combine catalog with candidate's specific profile skills
+        combined_tax = dict(TECH_CATALOG)
+        for s_low, s_orig in user_skills_clean.items():
+            if s_low not in combined_tax:
+                combined_tax[s_low] = s_orig
 
-            role_match = any(r in title_text.lower() for r in user_roles if r) or ("developer" in title_text.lower() and "developer" in combined)
-            base_score = 62
-            if role_match:
-                base_score += 14
-            skill_bonus = min(20, len(matched_tech) * 5)
-            final_score = min(96, base_score + skill_bonus)
+        # Sort keys by descending length so multi-word tokens match first
+        sorted_keys = sorted(combined_tax.keys(), key=len, reverse=True)
 
-            job["relevance_score"] = final_score
+        for job in scorable_jobs:
+            text = f"{job.get('title', '')} {job.get('description', '')}".lower()
+            detected_skills: dict[str, str] = {}
 
-            # 2. Generate precise, tailored improvements
-            improvements: list[str] = []
-            is_senior = any(w in title_text.lower() for w in ["senior", "sr", "lead", "architect", "staff", "principal"])
-            is_junior = any(w in title_text.lower() for w in ["junior", "jr", "entry", "associate", "intern", "trainee"])
+            # Detect genuine technical skills in job text
+            for key in sorted_keys:
+                # Word boundary check
+                pattern = rf"(?:\b|(?<=\W)){re.escape(key)}(?:\b|(?=\W))"
+                if re.search(pattern, text):
+                    label = combined_tax[key]
+                    if label not in detected_skills.values():
+                        detected_skills[key] = label
 
-            if missing_tech:
-                top_missing = missing_tech[:2]
-                if len(top_missing) == 1:
-                    improvements.append(f"Demonstrate hands-on proficiency in {top_missing[0]} through repository links or project bullets.")
+            clean_job_skills = list(detected_skills.values())
+
+            # Evaluate matches against candidate profile
+            matched = []
+            missing = []
+
+            for sk in clean_job_skills:
+                sk_low = sk.lower()
+                # Check candidate verified skills or full resume corpus
+                if sk_low in user_skills_clean or re.search(rf"\b{re.escape(sk_low)}\b", user_corpus):
+                    matched.append(sk)
                 else:
-                    improvements.append(f"Add projects or certifications demonstrating {top_missing[0]} and {top_missing[1]}.")
+                    missing.append(sk)
 
-            if is_senior:
-                improvements.append("Highlight scalable architecture decisions, code review mentorship, and production observability.")
-            elif is_junior:
-                if user_projects:
-                    proj_name = user_projects[0].get("name", "capstone")
-                    improvements.append(f"Emphasize technical challenges solved in your '{proj_name}' project with measurable outcomes.")
-                else:
-                    improvements.append(f"Attach a public GitHub repository showcasing clean, tested code tailored for {title_text}.")
+            total_req = len(clean_job_skills)
+            # Mathematical exact match formula: 100 * (matched / total_keywords)
+            math_score = round(100 * (len(matched) / total_req)) if total_req > 0 else 0
+
+            job["relevance_score"] = min(100, max(0, math_score))
+            job["matched_keywords"] = matched[:8]
+            job["missing_keywords"] = missing[:8]
+
+            improvements = []
+            if missing:
+                improvements.append(f"Highlight projects or practical experience demonstrating {', '.join(missing[:2])}.")
+            if matched:
+                improvements.append(f"Emphasize your hands-on accomplishments with {', '.join(matched[:2])}.")
             else:
-                if matched_tech:
-                    improvements.append(f"Highlight your practical production experience with {matched_tech[0]} in your bullet points.")
-                elif user_exps:
-                    exp_company = user_exps[0].get("company", "")
-                    improvements.append(f"Detail specific backend performance metrics or API milestones achieved at {exp_company}.")
-                else:
-                    improvements.append(f"Align resume terminology directly with {title_text} core deliverables.")
-
-            if len(improvements) < 2:
-                improvements.append(f"Tailor the resume summary specifically for {title_text} competencies.")
+                improvements.append("Tailor your resume project bullets to directly mirror the technical requirements.")
 
             job["areas_to_improve"] = improvements[:2]
 

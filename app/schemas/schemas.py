@@ -85,6 +85,9 @@ class JobCard(BaseModel):
     url: str
     source: Optional[str] = None
     relevance_score: Optional[int] = None
+    score_note: Optional[str] = None
+    matched_keywords: list[str] = []
+    missing_keywords: list[str] = []
     areas_to_improve: list[str] = []
 
 
